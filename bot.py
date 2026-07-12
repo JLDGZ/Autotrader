@@ -11,8 +11,8 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(mess
 log = logging.getLogger(__name__)
 
 # ─── CONFIG ───────────────────────────────────────────────
-API_KEY    = 'PKN2RA6WXSFVWCCQRCMXKBOLCB'
-SECRET_KEY = 'Ca2gPCip7Sru6K16G3ZL4NDwhLBPstkh8ePuF1CDfUPo'
+API_KEY    = 'PKRFMBYRB6E2RO2ZADBDZZWUNJ'
+SECRET_KEY = '447nsc8RgZNWXstnJAbM3XwGa5J4ZYf52yTd2PXKzxgy'
 BASE_URL   = 'https://paper-api.alpaca.markets'
 DATA_URL   = 'https://data.alpaca.markets'
 
@@ -38,6 +38,8 @@ MAX_HOLD_SECONDS  = 4 * 3600
 # ── Allocation ──
 LONG_ALLOCATION   = 0.25
 SHORT_ALLOCATION  = 0.08
+MAX_CAPITAL_USE   = 0.75   # never deploy more than 75% of account
+MIN_CASH_BUFFER   = 2000   # always keep $2000 cash minimum
 SCAN_INTERVAL     = 180    # scan every 3 min (faster reaction)
 
 HEADERS = {
@@ -246,6 +248,31 @@ def get_price(ticker):
         return None
 
 def do_buy(ticker, budget, tech):
+    # Always fetch LIVE buying power before every single trade
+    try:
+        live_acc       = alpaca('/v2/account')
+        live_bp        = float(live_acc['buying_power'])
+        live_equity    = float(live_acc['equity'])
+        live_positions = alpaca('/v2/positions')
+        deployed       = sum(float(p['market_value']) for p in live_positions)
+        max_deploy     = live_equity * MAX_CAPITAL_USE
+
+        if live_bp <= MIN_CASH_BUFFER:
+            add_log(f"⛔ {ticker}: BP ${live_bp:.0f} below ${MIN_CASH_BUFFER} buffer — skipping", 'warn')
+            return False
+        if deployed >= max_deploy:
+            add_log(f"⛔ {ticker}: deployed ${deployed:.0f} >= 75% cap ${max_deploy:.0f} — skipping", 'warn')
+            return False
+
+        # Cap budget to safe available cash
+        budget = min(budget, live_bp - MIN_CASH_BUFFER)
+        if budget < 50:
+            add_log(f"⛔ {ticker}: safe budget ${budget:.0f} too small — skipping", 'warn')
+            return False
+    except Exception as e:
+        add_log(f"⛔ {ticker}: BP check failed ({e}) — skipping", 'error')
+        return False
+
     price = get_price(ticker)
     if not price:
         add_log(f"{ticker}: no price data", 'warn')
@@ -259,7 +286,6 @@ def do_buy(ticker, budget, tech):
             'symbol': ticker, 'qty': qty,
             'side': 'buy', 'type': 'market', 'time_in_force': 'day'
         })
-        # Store entry metadata for trailing stop
         pos_meta[ticker] = {
             'entry_ts': time.time(),
             'entry_price': price,
